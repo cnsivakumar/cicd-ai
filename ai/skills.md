@@ -28,7 +28,6 @@ inside the prefix group where Azure disallows hyphens, e.g. storage).
 
 ## 3. Region allow-list
 
-- `centralindia`
 - `southindia`
 - `southeastasia`
 
