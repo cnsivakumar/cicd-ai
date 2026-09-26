@@ -1,13 +1,13 @@
 variable "workload" {
   type        = string
   description = "The name of the workload or application (e.g., 'myapp'). Used for naming conventions."
-  default     = "pop25"
+  default     = "aic"
 }
 
 variable "environment" {
   type        = string
   description = "The deployment environment (e.g., 'dev', 'test', 'prod')."
-  default     = "test"
+  default     = "dev"
 }
 
 variable "region_short" {
