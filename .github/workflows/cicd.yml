@@ -10,7 +10,6 @@ permissions:
 
 env:
   # Azure / ACR configuration
-  AZURE_SERVICE_CONNECTION: azserviceconn1
   ACR_NAME: mcpvalidatoracr01
   IMAGE_REPOSITORY: mcp-validator
   DOCKERFILE_PATH: ./mcp-server/Dockerfile
