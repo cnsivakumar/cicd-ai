@@ -22,7 +22,7 @@ env:
   # Azure Subscription
   AZURE_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
 
-  # n8n
+  # n8n from secrets
   N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
 
 jobs:
