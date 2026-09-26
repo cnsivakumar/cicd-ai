@@ -1,0 +1,537 @@
+name: AI Assisted Azure CI/CD
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  # Azure / ACR configuration
+  AZURE_SERVICE_CONNECTION: azserviceconn1
+  ACR_NAME: mcpvalidatoracr01
+  IMAGE_REPOSITORY: mcp-validator
+  DOCKERFILE_PATH: ./mcp-server/Dockerfile
+
+  RESOURCE_GROUP: mcp-server-rg
+  LOCATION: southeastasia
+  CONTAINER_ENVIRONMENT: mcp-validator-env
+  CONTAINER_APP_NAME: mcp-validator-app
+
+  # Azure Subscription
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+  # n8n
+  N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
+
+jobs:
+
+  # ============================================================
+  # JOB 1 - Check whether MCP server code has changed
+  # ============================================================
+  check-changes:
+    name: Check MCP Server Changes
+    runs-on: ubuntu-latest
+
+    outputs:
+      mcp_changed: ${{ steps.changes.outputs.mcp_changed }}
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check for MCP server changes
+        id: changes
+        shell: bash
+        run: |
+          echo "Checking for changes in mcp-server..."
+
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          if echo "$CHANGED_FILES" | grep -q "^mcp-server/"; then
+            echo "MCP server changes detected."
+            echo "mcp_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No MCP server changes detected."
+            echo "mcp_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+
+  # ============================================================
+  # JOB 2 - Build and Push MCP Docker Image
+  # ============================================================
+  build-and-push:
+    name: Build and Push MCP Image
+    runs-on: ubuntu-latest
+
+    needs:
+      - check-changes
+
+    if: needs.check-changes.outputs.mcp_changed == 'true'
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------------
+      # Azure Login
+      # --------------------------------------------------------
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: |
+            {
+              "clientId": "${{ secrets.ARM_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.ARM_CLIENT_SECRET }}",
+              "subscriptionId": "${{ secrets.ARM_SUBSCRIPTION_ID }}",
+              "tenantId": "${{ secrets.ARM_TENANT_ID }}"
+            }
+
+      # --------------------------------------------------------
+      # Login to ACR
+      # --------------------------------------------------------
+      - name: Login to Azure Container Registry
+        run: |
+          az acr login --name "$ACR_NAME"
+
+      # --------------------------------------------------------
+      # Build Docker Image
+      # --------------------------------------------------------
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f "$DOCKERFILE_PATH" \
+            -t "$ACR_NAME.azurecr.io/$IMAGE_REPOSITORY:${{ github.run_number }}" \
+            -t "$ACR_NAME.azurecr.io/$IMAGE_REPOSITORY:latest" \
+            ./mcp-server
+
+      # --------------------------------------------------------
+      # Push Docker Image
+      # --------------------------------------------------------
+      - name: Push Docker image
+        run: |
+          docker push \
+            "$ACR_NAME.azurecr.io/$IMAGE_REPOSITORY:${{ github.run_number }}"
+
+          docker push \
+            "$ACR_NAME.azurecr.io/$IMAGE_REPOSITORY:latest"
+
+
+  # ============================================================
+  # JOB 3 - Deploy / Provision MCP Container App
+  # ============================================================
+  deploy-mcp:
+    name: Deploy MCP Container App
+    runs-on: ubuntu-latest
+
+    needs:
+      - check-changes
+      - build-and-push
+
+    if: needs.check-changes.outputs.mcp_changed == 'true'
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------------
+      # Azure Login
+      # --------------------------------------------------------
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: |
+            {
+              "clientId": "${{ secrets.ARM_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.ARM_CLIENT_SECRET }}",
+              "subscriptionId": "${{ secrets.ARM_SUBSCRIPTION_ID }}",
+              "tenantId": "${{ secrets.ARM_TENANT_ID }}"
+            }
+
+      # --------------------------------------------------------
+      # Get ACR credentials
+      # --------------------------------------------------------
+      - name: Get ACR credentials
+        id: acr
+        shell: bash
+        run: |
+          ACR_USERNAME=$(az acr credential show \
+            --name "$ACR_NAME" \
+            --query "username" \
+            -o tsv)
+
+          ACR_PASSWORD=$(az acr credential show \
+            --name "$ACR_NAME" \
+            --query "passwords[0].value" \
+            -o tsv)
+
+          echo "::add-mask::$ACR_PASSWORD"
+
+          echo "ACR_USERNAME=$ACR_USERNAME" >> "$GITHUB_OUTPUT"
+          echo "ACR_PASSWORD=$ACR_PASSWORD" >> "$GITHUB_OUTPUT"
+
+      # --------------------------------------------------------
+      # Create / Update Container App
+      # --------------------------------------------------------
+      - name: Deploy Container App
+        shell: bash
+        run: |
+          az containerapp create \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "$ACR_NAME.azurecr.io/$IMAGE_REPOSITORY:latest" \
+            --environment "$CONTAINER_ENVIRONMENT" \
+            --ingress external \
+            --target-port 8000 \
+            --registry-server "$ACR_NAME.azurecr.io" \
+            --registry-username "${{ steps.acr.outputs.ACR_USERNAME }}" \
+            --registry-password "${{ steps.acr.outputs.ACR_PASSWORD }}" \
+            --system-assigned \
+            --transport http \
+            --min-replicas 0 \
+            --max-replicas 2 \
+            --env-vars \
+              AZURE_SUBSCRIPTION_ID="$AZURE_SUBSCRIPTION_ID"
+
+      # --------------------------------------------------------
+      # Display Container App URL
+      # --------------------------------------------------------
+      - name: Get Container App URL
+        run: |
+          FQDN=$(az containerapp show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "properties.configuration.ingress.fqdn" \
+            -o tsv)
+
+          echo "MCP Server URL:"
+          echo "https://$FQDN"
+
+          echo "MCP Health URL:"
+          echo "https://$FQDN/health"
+
+
+  # ============================================================
+  # JOB 4 - Terraform Validation and n8n Validation
+  # ============================================================
+  terraform-validation:
+    name: Terraform and n8n Validation
+    runs-on: ubuntu-latest
+
+    needs:
+      - check-changes
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      # --------------------------------------------------------
+      # Azure Login
+      # --------------------------------------------------------
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: |
+            {
+              "clientId": "${{ secrets.ARM_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.ARM_CLIENT_SECRET }}",
+              "subscriptionId": "${{ secrets.ARM_SUBSCRIPTION_ID }}",
+              "tenantId": "${{ secrets.ARM_TENANT_ID }}"
+            }
+
+      # --------------------------------------------------------
+      # Install Terraform
+      # --------------------------------------------------------
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: latest
+
+      # --------------------------------------------------------
+      # Terraform Plan -> resources.json
+      # --------------------------------------------------------
+      - name: Extract Terraform plan resources
+        shell: bash
+        run: |
+          chmod +x scripts/extract-plan.sh
+
+          ./scripts/extract-plan.sh > resources.json
+
+          echo "Generated resources.json:"
+          cat resources.json
+
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+      # --------------------------------------------------------
+      # Install jq
+      # --------------------------------------------------------
+      - name: Verify jq
+        run: |
+          jq --version
+
+      # --------------------------------------------------------
+      # Build payload for n8n
+      # --------------------------------------------------------
+      - name: Build n8n payload
+        shell: bash
+        run: |
+
+          jq \
+            --arg buildId "${{ github.run_id }}" \
+            --arg buildUrl "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --arg definitionName "${{ github.workflow }}" \
+            --arg sourceBranch "${{ github.ref }}" \
+            --arg requestedFor "${{ github.actor }}" \
+            --arg requestedForEmail "${{ github.actor }}" \
+            --rawfile skillDoc ai/skills.md \
+            '. + {
+              pipeline: {
+                buildId: $buildId,
+                buildUrl: $buildUrl,
+                definitionName: $definitionName,
+                sourceBranch: $sourceBranch,
+                requestedFor: $requestedFor,
+                requestedForEmail: $requestedForEmail
+              },
+              skillDoc: $skillDoc
+            }' \
+            resources.json > payload.json
+
+          echo "Generated payload.json:"
+          cat payload.json
+
+      # --------------------------------------------------------
+      # Call n8n Webhook
+      # --------------------------------------------------------
+      - name: Validate resources via n8n
+        shell: bash
+        run: |
+
+          RESPONSE=$(curl -sS \
+            -X POST \
+            "$N8N_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            --data @payload.json)
+
+          echo "$RESPONSE" > n8n-result.json
+
+          echo "n8n Response:"
+          echo "$RESPONSE" | jq .
+
+          FAILED_COUNT=$(echo "$RESPONSE" | \
+            jq '[.results[] | select(.available == false)] | length')
+
+          TOTAL_COUNT=$(echo "$RESPONSE" | \
+            jq '.results | length')
+
+          echo "Failed resources: $FAILED_COUNT"
+          echo "Total resources: $TOTAL_COUNT"
+
+          if [ "$FAILED_COUNT" -gt 0 ]; then
+
+            echo "::error::Resource name validation failed for $FAILED_COUNT of $TOTAL_COUNT resource(s)."
+
+            echo "$RESPONSE" | \
+              jq -r '.results[] |
+              select(.available == false) |
+              "  - \(.resource_type) \(.name): \(.message // "name not available")"'
+
+            exit 1
+          fi
+
+          echo "All $TOTAL_COUNT resource(s) passed name availability validation."
+
+        env:
+          N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
+
+
+  # ============================================================
+  # JOB 5 - Terraform Validate
+  # ============================================================
+  terraform-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+
+    needs:
+      - terraform-validation
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: |
+            {
+              "clientId": "${{ secrets.ARM_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.ARM_CLIENT_SECRET }}",
+              "subscriptionId": "${{ secrets.ARM_SUBSCRIPTION_ID }}",
+              "tenantId": "${{ secrets.ARM_TENANT_ID }}"
+            }
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: latest
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init -input=false
+
+      - name: Terraform Format Check
+        working-directory: terraform
+        run: |
+          if ! terraform fmt -check -diff; then
+            echo "::error::Terraform files are not formatted. Run 'terraform fmt' locally and commit the result."
+            exit 1
+          fi
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: |
+          terraform validate
+
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+
+  # ============================================================
+  # JOB 6 - Terraform Plan
+  # ============================================================
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+
+    needs:
+      - terraform-validate
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: |
+            {
+              "clientId": "${{ secrets.ARM_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.ARM_CLIENT_SECRET }}",
+              "subscriptionId": "${{ secrets.ARM_SUBSCRIPTION_ID }}",
+              "tenantId": "${{ secrets.ARM_TENANT_ID }}"
+            }
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: latest
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init -input=false
+
+      - name: Terraform Plan
+        working-directory: terraform
+        run: |
+          terraform plan -out=tfplan
+
+      - name: Terraform Show
+        working-directory: terraform
+        run: |
+          terraform show tfplan
+
+      # --------------------------------------------------------
+      # Save plan as GitHub Actions artifact
+      # --------------------------------------------------------
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: terraform/tfplan
+
+    env:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+
+  # ============================================================
+  # JOB 7 - Terraform Apply
+  # ============================================================
+  terraform-apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+
+    needs:
+      - terraform-plan
+
+    environment:
+      name: production
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: |
+            {
+              "clientId": "${{ secrets.ARM_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.ARM_CLIENT_SECRET }}",
+              "subscriptionId": "${{ secrets.ARM_SUBSCRIPTION_ID }}",
+              "tenantId": "${{ secrets.ARM_TENANT_ID }}"
+            }
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: latest
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init -input=false
+
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: terraform
+
+      - name: Terraform Apply
+        working-directory: terraform
+        run: |
+          terraform apply -auto-approve tfplan
+
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
