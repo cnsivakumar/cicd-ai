@@ -31,37 +31,36 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write # Required to allow writing comments to the PR
+      pull-requests: write
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2 # Fetches the commit history necessary to view the diff
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22' # Installs an updated Node environment
+          node-version: '22'
 
       - name: Install GitHub Copilot CLI
-        run: npm install -g @github/copilot # Installs the official package globally
+        run: npm install -g @github/copilot
 
       - name: Generate PR Git Diff
         run: |
-          git diff HEAD~1 HEAD > pr_diff.txt
+          git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt
 
       - name: Execute SKILL.md Review via Copilot CLI
         env:
-          GH_TOKEN: \${{ secrets.MYGIT }} # Uses the repository's built-in token
+          COPILOT_GITHUB_TOKEN: ${{ secrets.MYGIT }}
         run: |
-          echo "### Running Copilot Pre-PR Review"
-          
-          # We prompt the CLI to scan the text of our git diff using the custom markdown rule asset
-          copilot review --allow-tool='shell' \
-            "Review the changes in pr_diff.txt according to the coding rules, severities, and instructions defined in .github/skills/code-review/SKILL.md." \
+          copilot -s \
+            --allow-tool='shell(cat)' \
+            --allow-tool='shell(git)' \
+            -p "Review the changes in pr_diff.txt following the instructions, checklist, and report format in .github/skills/pre-pr-review/SKILL.md. Output only the review report." \
             > copilot_review_output.md
-            
+
           cat copilot_review_output.md
 
       - name: Comment Review Results on Pull Request
@@ -69,9 +68,12 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const reviewOutput = fs.readFileSync('copilot_review_output.md', 'utf8');
-            
-            github.rest.issues.createComment({
+            let reviewOutput = fs.readFileSync('copilot_review_output.md', 'utf8');
+            // GitHub comments are limited to 65,536 characters
+            if (reviewOutput.length > 60000) {
+              reviewOutput = reviewOutput.slice(0, 60000) + '\n\n_(truncated)_';
+            }
+            await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
