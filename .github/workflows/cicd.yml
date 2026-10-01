@@ -53,7 +53,7 @@ jobs:
 
       - name: Execute SKILL.md Review via Copilot CLI
         env:
-          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.MYGIT }}
         run: |
           copilot -s \
             --allow-tool='shell(cat)' \
