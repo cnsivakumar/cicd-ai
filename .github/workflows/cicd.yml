@@ -50,6 +50,42 @@ jobs:
       - name: Generate PR Git Diff
         run: |
           git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt
+      
+      - name: Validate Copilot token
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.MYGIT }}
+        run: |
+          # 1. Secret present?
+          if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
+            echo "::error::Secret MYGIT is empty or not available to this workflow (fork/Dependabot run, or wrong secret name/scope)."
+            exit 1
+          fi
+
+          # 2. Token type
+          case "$COPILOT_GITHUB_TOKEN" in
+            github_pat_*) echo "Token type: fine-grained PAT" ;;
+            ghp_*)        echo "::error::Classic PAT detected. Use a fine-grained PAT with Copilot Requests permission."; exit 1 ;;
+            ghs_*)        echo "::error::GITHUB_TOKEN-style token detected. It cannot be used for Copilot CLI."; exit 1 ;;
+            *)            echo "::warning::Unrecognized token prefix." ;;
+          esac
+
+          # 3. Token valid and not expired?
+          status=$(curl -s -o /tmp/user.json -w "%{http_code}" \
+            -H "Authorization: Bearer $COPILOT_GITHUB_TOKEN" \
+            https://api.github.com/user)
+          if [ "$status" != "200" ]; then
+            echo "::error::GitHub API rejected the token (HTTP $status). It is invalid or expired."
+            exit 1
+          fi
+          echo "Token belongs to: $(jq -r .login /tmp/user.json)"
+
+          # 4. Copilot smoke test (confirms seat, permission, and org policy)
+          if ! copilot -s -p "Reply with the single word OK" > /tmp/smoke.txt 2>&1; then
+            echo "::error::Token is valid but Copilot CLI auth failed. Check: Copilot seat on this user, 'Copilot Requests' permission, PAT resource owner, and org Copilot CLI policy."
+            cat /tmp/smoke.txt
+            exit 1
+          fi
+          echo "Copilot CLI authentication OK"
 
       - name: Execute SKILL.md Review via Copilot CLI
         env:
