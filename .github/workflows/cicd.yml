@@ -1,7 +1,7 @@
 name: AI Assisted Azure CI/CD
 
 on:
-  push:
+  pull_request:
     branches:
       - main
 
@@ -25,7 +25,59 @@ env:
   # n8n from secrets
   N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
 
+
 jobs:
+  copilot-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # Required to allow writing comments to the PR
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 # Fetches the commit history necessary to view the diff
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22' # Installs an updated Node environment
+
+      - name: Install GitHub Copilot CLI
+        run: npm install -g @github/copilot # Installs the official package globally
+
+      - name: Generate PR Git Diff
+        run: |
+          git diff HEAD~1 HEAD > pr_diff.txt
+
+      - name: Execute SKILL.md Review via Copilot CLI
+        env:
+          GH_TOKEN: \${{ secrets.MYGIT }} # Uses the repository's built-in token
+        run: |
+          echo "### Running Copilot Pre-PR Review"
+          
+          # We prompt the CLI to scan the text of our git diff using the custom markdown rule asset
+          copilot review --allow-tool='shell' \
+            "Review the changes in pr_diff.txt according to the coding rules, severities, and instructions defined in .github/skills/code-review/SKILL.md." \
+            > copilot_review_output.md
+            
+          cat copilot_review_output.md
+
+      - name: Comment Review Results on Pull Request
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const reviewOutput = fs.readFileSync('copilot_review_output.md', 'utf8');
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### 🤖 Automated Copilot Skill Review\n\n${reviewOutput}`
+            });
+
 
   # ============================================================
   # JOB 1 - Check whether MCP server code has changed
