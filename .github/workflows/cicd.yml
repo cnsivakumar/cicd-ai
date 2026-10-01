@@ -1,7 +1,7 @@
 name: AI Assisted Azure CI/CD
 
 on:
-  pull_request:
+  push:
     branches:
       - main
 
@@ -27,96 +27,6 @@ env:
 
 
 jobs:
-  copilot-review:
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      pull-requests: write
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install GitHub Copilot CLI
-        run: npm install -g @github/copilot
-
-      - name: Generate PR Git Diff
-        run: |
-          git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt
-      
-      - name: Validate Copilot token
-        env:
-          COPILOT_GITHUB_TOKEN: ${{ secrets.MYGIT }}
-        run: |
-          # 1. Secret present?
-          if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
-            echo "::error::Secret MYGIT is empty or not available to this workflow (fork/Dependabot run, or wrong secret name/scope)."
-            exit 1
-          fi
-
-          # 2. Token type
-          case "$COPILOT_GITHUB_TOKEN" in
-            github_pat_*) echo "Token type: fine-grained PAT" ;;
-            ghp_*)        echo "::error::Classic PAT detected. Use a fine-grained PAT with Copilot Requests permission."; exit 1 ;;
-            ghs_*)        echo "::error::GITHUB_TOKEN-style token detected. It cannot be used for Copilot CLI."; exit 1 ;;
-            *)            echo "::warning::Unrecognized token prefix." ;;
-          esac
-
-          # 3. Token valid and not expired?
-          status=$(curl -s -o /tmp/user.json -w "%{http_code}" \
-            -H "Authorization: Bearer $COPILOT_GITHUB_TOKEN" \
-            https://api.github.com/user)
-          if [ "$status" != "200" ]; then
-            echo "::error::GitHub API rejected the token (HTTP $status). It is invalid or expired."
-            exit 1
-          fi
-          echo "Token belongs to: $(jq -r .login /tmp/user.json)"
-
-          # 4. Copilot smoke test (confirms seat, permission, and org policy)
-          if ! copilot -s -p "Reply with the single word OK" > /tmp/smoke.txt 2>&1; then
-            echo "::error::Token is valid but Copilot CLI auth failed. Check: Copilot seat on this user, 'Copilot Requests' permission, PAT resource owner, and org Copilot CLI policy."
-            cat /tmp/smoke.txt
-            exit 1
-          fi
-          echo "Copilot CLI authentication OK"
-
-      - name: Execute SKILL.md Review via Copilot CLI
-        env:
-          COPILOT_GITHUB_TOKEN: ${{ secrets.MYGIT }}
-        run: |
-          copilot -s \
-            --allow-tool='shell(cat)' \
-            --allow-tool='shell(git)' \
-            -p "Review the changes in pr_diff.txt following the instructions, checklist, and report format in .github/skills/pre-pr-review/SKILL.md. Output only the review report." \
-            > copilot_review_output.md
-
-          cat copilot_review_output.md
-
-      - name: Comment Review Results on Pull Request
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            let reviewOutput = fs.readFileSync('copilot_review_output.md', 'utf8');
-            // GitHub comments are limited to 65,536 characters
-            if (reviewOutput.length > 60000) {
-              reviewOutput = reviewOutput.slice(0, 60000) + '\n\n_(truncated)_';
-            }
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `### 🤖 Automated Copilot Skill Review\n\n${reviewOutput}`
-            });
-
-
   # ============================================================
   # JOB 1 - Check whether MCP server code has changed
   # ============================================================
